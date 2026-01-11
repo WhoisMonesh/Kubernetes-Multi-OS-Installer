@@ -2,6 +2,9 @@
 
 > 🚀 **One-Click Kubernetes Setup for Windows, macOS, and Linux**
 
+<img width="1362" height="717" alt="image" src="https://github.com/user-attachments/assets/c8a3d9d4-ebcb-47e8-8b52-a207e66883b3" />
+
+
 A user-friendly desktop application that automatically installs and configures Kubernetes on your computer - no command line experience needed!
 
 ## 📖 What is This?
