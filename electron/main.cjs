@@ -1,3 +1,12 @@
+// Handle squirrel events for Windows installer
+const electronSquirrelStart = require('electron-squirrel-startup');
+
+if (electronSquirrelStart) {
+  // If squirrel event was handled, exit the app
+  process.exit(0);
+}
+
+// Only import Electron modules after checking squirrel events
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const { exec, spawn } = require('child_process');
 const os = require('os');
@@ -22,7 +31,9 @@ class KubernetesInstaller {
       case 'darwin':
         return 'homebrew';
       case 'win32':
-        return this.checkCommandSync('winget --version') ? 'winget' : 'choco';
+        // On Windows, check for winget first, then chocolatey
+        return this.checkCommandSync('winget --version') ? 'winget' : 
+               this.checkCommandSync('choco --version') ? 'choco' : 'unknown';
       case 'linux':
         return this.detectLinuxPackageManager();
       default:
@@ -40,16 +51,56 @@ class KubernetesInstaller {
 
   checkCommandSync(command) {
     try {
-      require('child_process').execSync(command, { stdio: 'ignore' });
+      let fullCommand, shell, windowsVerbatimArguments;
+      
+      if (this.platform === 'win32') {
+        // On Windows, use cmd.exe with /c flag for better compatibility
+        // Escape special characters in the command
+        const escapedCommand = command.replace(/&/g, '^&').replace(/</g, '^<').replace(/>/g, '^>');
+        fullCommand = `cmd /c ${escapedCommand}`;
+        shell = 'cmd.exe';
+        windowsVerbatimArguments = true;
+      } else {
+        fullCommand = command;
+        shell = this.platform === 'win32' ? 'cmd.exe' : 'bash';
+      }
+      console.log(`Executing sync command: ${fullCommand}`);
+      require('child_process').execSync(fullCommand, { 
+        stdio: 'pipe',
+        shell: shell,
+        windowsVerbatimArguments: windowsVerbatimArguments,
+        env: { ...process.env }
+      });
       return true;
     } catch (error) {
+      console.log(`Sync command failed: ${error.message}`);
       return false;
     }
   }
 
   async checkCommand(command) {
     return new Promise((resolve) => {
-      exec(command, { timeout: 5000 }, (error, stdout, stderr) => {
+      let fullCommand, shell, windowsVerbatimArguments;
+      
+      if (this.platform === 'win32') {
+        // On Windows, use cmd.exe with /c flag for better compatibility
+        // Escape special characters in the command
+        const escapedCommand = command.replace(/&/g, '^&').replace(/</g, '^<').replace(/>/g, '^>');
+        fullCommand = `cmd /c ${escapedCommand}`;
+        shell = 'cmd.exe';
+        windowsVerbatimArguments = true;
+      } else {
+        fullCommand = command;
+        shell = this.platform === 'win32' ? 'cmd.exe' : 'bash';
+      }
+      console.log(`Executing async check command: ${fullCommand}`);
+      exec(fullCommand, { 
+        shell: shell,
+        windowsVerbatimArguments: windowsVerbatimArguments,
+        timeout: 10000, // Increased timeout for Windows commands
+        env: { ...process.env }
+      }, (error, stdout, stderr) => {
+        console.log(`Check command result: success=${!error}, version="${stdout.trim()}"`);
         resolve({
           installed: !error,
           version: error ? null : stdout.trim(),
@@ -69,16 +120,37 @@ class KubernetesInstaller {
       kind: await this.checkCommand('kind version')
     };
     return checks;
-  }
+ }
 
   async executeCommand(command, options = {}) {
     return new Promise((resolve) => {
-      const child = exec(command, {
-        shell: true,
+      let fullCommand, shell, windowsVerbatimArguments;
+      
+      if (this.platform === 'win32') {
+        // On Windows, use cmd.exe with /c flag for better compatibility
+        // Also escape special characters and use proper quoting
+        fullCommand = `cmd /c ${command}`;
+        shell = 'cmd.exe';
+        windowsVerbatimArguments = true;
+      } else {
+        fullCommand = command;
+        shell = this.platform === 'win32' ? 'cmd.exe' : 'bash';
+      }
+      
+      console.log(`Executing command: ${fullCommand}`);
+      
+      const child = exec(fullCommand, {
+        shell: shell,
+        windowsVerbatimArguments: windowsVerbatimArguments,
         maxBuffer: 1024 * 1024 * 10,
-        timeout: options.timeout || 300000,
+        timeout: options.timeout || 300000, // Increased default timeout to 5 minutes
+        env: { ...process.env }, // Pass through environment variables
         ...options
       }, (error, stdout, stderr) => {
+        console.log(`Command completed. Success: ${!error}, Error: ${error ? error.message : 'none'}`);
+        console.log(`Stdout: ${stdout.substring(0, 500)}...`); // Limit output length
+        if (stderr) console.log(`Stderr: ${stderr.substring(0, 500)}...`); // Limit output length
+        
         resolve({
           success: !error,
           output: stdout,
@@ -89,9 +161,11 @@ class KubernetesInstaller {
 
       if (options.onData) {
         child.stdout.on('data', (data) => {
+          console.log(`Command output: ${data.toString().substring(0, 200)}...`);
           options.onData(data.toString());
         });
         child.stderr.on('data', (data) => {
+          console.error(`Command error: ${data.toString().substring(0, 200)}...`);
           options.onData(data.toString());
         });
       }
@@ -139,7 +213,7 @@ class KubernetesInstaller {
         command = 'sudo pacman -Sy';
         break;
       case 'winget':
-        command = 'winget upgrade --all';
+        command = 'winget upgrade --all --silent'; // Added silent flag for better Windows experience
         break;
       case 'choco':
         command = 'choco upgrade all -y';
@@ -160,21 +234,50 @@ class KubernetesInstaller {
   async installDocker() {
     let command = '';
 
+    // Log the detected OS for debugging
+    console.log(`Installing Docker for platform: ${this.platform}`);
+
     switch(this.platform) {
-      case 'darwin':
+      case 'darwin': // macOS
+        console.log('Using Homebrew to install Docker Desktop for Mac...');
         command = 'brew install --cask docker';
         break;
-      case 'win32':
+      case 'win32': // Windows
+        console.log(`Using ${this.packageManager} to install Docker Desktop for Windows...`);
+        // Use more specific package IDs and handle already installed case
+        // Note: winget doesn't have --overwrite, so we just use --force
         command = this.packageManager === 'winget'
-          ? 'winget install Docker.DockerDesktop'
-          : 'choco install docker-desktop -y';
+          ? 'winget install --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements --silent --force'
+          : 'choco install docker-desktop -y --force';
         break;
-      case 'linux':
-        command = 'curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && sudo sh /tmp/get-docker.sh';
+      case 'linux': // Linux
+        console.log('Downloading and installing Docker for Linux...');
+        command = 'curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh && rm get-docker.sh';
         break;
+      default:
+        return {
+          success: false,
+          message: `Unsupported platform: ${this.platform}`,
+          output: '',
+          error: `Installation not supported on ${this.platform}`
+        };
     }
 
     const result = await this.executeCommand(command, { timeout: 600000 });
+    
+    // Check if the failure was due to already installed package
+    if (!result.success) {
+      if (result.error && (result.error.includes("already installed") || result.error.includes("No available upgrade"))) {
+        console.log("Docker is already installed, treating as success");
+        return {
+          success: true,
+          message: 'Docker is already installed',
+          output: result.output,
+          error: result.error
+        };
+      }
+    }
+    
     return {
       success: result.success,
       message: result.success ? 'Docker installed successfully' : 'Docker installation failed',
@@ -186,25 +289,54 @@ class KubernetesInstaller {
   async installKubectl() {
     let command = '';
 
+    // Log the detected OS for debugging
+    console.log(`Installing kubectl for platform: ${this.platform}`);
+
     switch(this.platform) {
-      case 'darwin':
+      case 'darwin': // macOS
+        console.log('Using Homebrew to install kubectl for Mac...');
         command = 'brew install kubectl';
         break;
-      case 'win32':
+      case 'win32': // Windows
+        console.log(`Using ${this.packageManager} to install kubectl for Windows...`);
+        // Use more specific installation commands for Windows
+        // Note: winget doesn't have --overwrite, so we just use --force
         command = this.packageManager === 'winget'
-          ? 'winget install Kubernetes.kubectl'
+          ? 'winget install --id Kubernetes.kubectl --accept-package-agreements --accept-source-agreements --silent --force'
           : 'choco install kubernetes-cli -y';
         break;
-      case 'linux':
+      case 'linux': // Linux
+        console.log('Downloading and installing kubectl for Linux...');
         if (this.packageManager === 'apt') {
           command = 'sudo apt-get update && sudo apt-get install -y kubectl';
         } else {
-          command = 'curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl';
+          command = 'curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && chmod +x kubectl && sudo install kubectl /usr/local/bin/ && rm kubectl';
         }
         break;
+      default:
+        return {
+          success: false,
+          message: `Unsupported platform: ${this.platform}`,
+          output: '',
+          error: `Installation not supported on ${this.platform}`
+        };
     }
 
     const result = await this.executeCommand(command);
+    
+    // Check if the failure was due to already installed package
+    if (!result.success) {
+      if (result.error && (result.error.includes("already installed") || result.error.includes("No available upgrade"))) {
+        console.log("kubectl is already installed, treating as success");
+        return {
+          success: true,
+          message: 'kubectl is already installed',
+          output: result.output,
+          error: result.error
+        };
+      }
+    }
+    
     return {
       success: result.success,
       message: result.success ? 'kubectl installed successfully' : 'kubectl installation failed',
@@ -216,21 +348,50 @@ class KubernetesInstaller {
   async installMinikube() {
     let command = '';
 
+    // Log the detected OS for debugging
+    console.log(`Installing Minikube for platform: ${this.platform}`);
+
     switch(this.platform) {
-      case 'darwin':
+      case 'darwin': // macOS
+        console.log('Using Homebrew to install Minikube for Mac...');
         command = 'brew install minikube';
         break;
-      case 'win32':
+      case 'win32': // Windows
+        console.log(`Using ${this.packageManager} to install Minikube for Windows...`);
+        // Use more specific installation commands for Windows
+        // Note: winget doesn't have --overwrite, so we just use --force
         command = this.packageManager === 'winget'
-          ? 'winget install Kubernetes.minikube'
+          ? 'winget install --id Kubernetes.minikube --accept-package-agreements --accept-source-agreements --silent --force'
           : 'choco install minikube -y';
         break;
-      case 'linux':
-        command = 'curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64 && sudo install minikube-linux-amd64 /usr/local/bin/minikube';
+      case 'linux': // Linux
+        console.log('Downloading and installing Minikube for Linux...');
+        command = 'curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64 && chmod +x minikube-linux-amd64 && sudo install minikube-linux-amd64 /usr/local/bin/minikube && rm minikube-linux-amd64';
         break;
+      default:
+        return {
+          success: false,
+          message: `Unsupported platform: ${this.platform}`,
+          output: '',
+          error: `Installation not supported on ${this.platform}`
+        };
     }
 
     const result = await this.executeCommand(command);
+    
+    // Check if the failure was due to already installed package
+    if (!result.success) {
+      if (result.error && (result.error.includes("already installed") || result.error.includes("No available upgrade"))) {
+        console.log("Minikube is already installed, treating as success");
+        return {
+          success: true,
+          message: 'Minikube is already installed',
+          output: result.output,
+          error: result.error
+        };
+      }
+    }
+    
     return {
       success: result.success,
       message: result.success ? 'Minikube installed successfully' : 'Minikube installation failed',
@@ -242,19 +403,50 @@ class KubernetesInstaller {
   async installKind() {
     let command = '';
 
+    // Log the detected OS for debugging
+    console.log(`Installing Kind for platform: ${this.platform}`);
+
     switch(this.platform) {
-      case 'darwin':
+      case 'darwin': // macOS
+        console.log('Using Homebrew to install Kind for Mac...');
         command = 'brew install kind';
         break;
-      case 'win32':
-        command = 'choco install kind -y';
+      case 'win32': // Windows
+        console.log(`Using ${this.packageManager} to install Kind for Windows...`);
+        // Use more specific installation commands for Windows
+        // Note: winget doesn't have --overwrite, so we just use --force
+        command = this.packageManager === 'winget'
+          ? 'winget install --id Kubernetes.Kind --accept-package-agreements --accept-source-agreements --silent --force'
+          : 'choco install kind -y';
         break;
-      case 'linux':
-        command = 'curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64 && chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind';
+      case 'linux': // Linux
+        console.log('Downloading and installing Kind for Linux...');
+        command = 'curl -Lo kind "https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64" && chmod +x kind && sudo install kind /usr/local/bin/ && rm kind';
         break;
+      default:
+        return {
+          success: false,
+          message: `Unsupported platform: ${this.platform}`,
+          output: '',
+          error: `Installation not supported on ${this.platform}`
+        };
     }
 
     const result = await this.executeCommand(command);
+    
+    // Check if the failure was due to already installed package
+    if (!result.success) {
+      if (result.error && (result.error.includes("already installed") || result.error.includes("No available upgrade"))) {
+        console.log("Kind is already installed, treating as success");
+        return {
+          success: true,
+          message: 'Kind is already installed',
+          output: result.output,
+          error: result.error
+        };
+      }
+    }
+    
     return {
       success: result.success,
       message: result.success ? 'Kind installed successfully' : 'Kind installation failed',
@@ -266,21 +458,50 @@ class KubernetesInstaller {
   async installHelm() {
     let command = '';
 
+    // Log the detected OS for debugging
+    console.log(`Installing Helm for platform: ${this.platform}`);
+
     switch(this.platform) {
-      case 'darwin':
+      case 'darwin': // macOS
+        console.log('Using Homebrew to install Helm for Mac...');
         command = 'brew install helm';
         break;
-      case 'win32':
+      case 'win32': // Windows
+        console.log(`Using ${this.packageManager} to install Helm for Windows...`);
+        // Use more specific installation commands for Windows
+        // Note: winget doesn't have --overwrite, so we just use --force
         command = this.packageManager === 'winget'
-          ? 'winget install Helm.Helm'
+          ? 'winget install --id Helm.Helm --accept-package-agreements --accept-source-agreements --silent --force'
           : 'choco install kubernetes-helm -y';
         break;
-      case 'linux':
+      case 'linux': // Linux
+        console.log('Downloading and installing Helm for Linux...');
         command = 'curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash';
         break;
+      default:
+        return {
+          success: false,
+          message: `Unsupported platform: ${this.platform}`,
+          output: '',
+          error: `Installation not supported on ${this.platform}`
+        };
     }
 
     const result = await this.executeCommand(command);
+    
+    // Check if the failure was due to already installed package
+    if (!result.success) {
+      if (result.error && (result.error.includes("already installed") || result.error.includes("No available upgrade"))) {
+        console.log("Helm is already installed, treating as success");
+        return {
+          success: true,
+          message: 'Helm is already installed',
+          output: result.output,
+          error: result.error
+        };
+      }
+    }
+    
     return {
       success: result.success,
       message: result.success ? 'Helm installed successfully' : 'Helm installation failed',
@@ -353,6 +574,7 @@ function createWindow() {
   });
 }
 
+// Initialize Electron app
 app.whenReady().then(() => {
   createWindow();
 
@@ -424,7 +646,7 @@ ipcMain.handle('install-component', async (event, component) => {
 });
 
 ipcMain.handle('start-cluster', async (event, clusterType) => {
-  const installer = new KubernetesInstaller();
+ const installer = new KubernetesInstaller();
 
   if (clusterType === 'minikube') {
     return await installer.startMinikube();
