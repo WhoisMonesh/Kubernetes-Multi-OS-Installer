@@ -27,3 +27,4 @@ dist-electron/**
 !dist-electron/.gitkeep
 build/**
 !build/.gitkeep
+dist-electron/ 
