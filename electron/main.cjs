@@ -93,14 +93,37 @@ class KubernetesInstaller {
         fullCommand = command;
         shell = this.platform === 'win32' ? 'cmd.exe' : 'bash';
       }
+      
       console.log(`Executing async check command: ${fullCommand}`);
+
+      // Enhance environment for macOS to include Homebrew paths for check commands too
+      let enhancedEnv = { ...process.env };
+      if (this.platform === 'darwin') {
+        // Add common Homebrew paths to PATH
+        const homebrewPaths = [
+          '/opt/homebrew/bin',  // Apple Silicon Homebrew
+          '/usr/local/bin',     // Intel Homebrew
+          '/opt/homebrew/sbin',
+          '/usr/local/sbin'
+        ];
+        
+        let newPath = enhancedEnv.PATH || enhancedEnv.Path || '';
+        homebrewPaths.forEach(homebrewPath => {
+          if (!newPath.includes(homebrewPath)) {
+            newPath = `${homebrewPath}:${newPath}`;
+          }
+        });
+        enhancedEnv.PATH = newPath;
+        enhancedEnv.Path = newPath; // For compatibility
+      }
+
       exec(fullCommand, { 
         shell: shell,
         windowsVerbatimArguments: windowsVerbatimArguments,
         timeout: 10000, // Increased timeout for Windows commands
-        env: { ...process.env }
+        env: enhancedEnv // Enhanced environment with Homebrew paths
       }, (error, stdout, stderr) => {
-        console.log(`Check command result: success=${!error}, version="${stdout.trim()}"`);
+        console.log(`Check command result: success=${!error}, version="${stdout.trim()}", error="${error ? stderr : null}"`);
         resolve({
           installed: !error,
           version: error ? null : stdout.trim(),
@@ -125,7 +148,7 @@ class KubernetesInstaller {
   async executeCommand(command, options = {}) {
     return new Promise((resolve) => {
       let fullCommand, shell, windowsVerbatimArguments;
-      
+
       if (this.platform === 'win32') {
         // On Windows, use cmd.exe with /c flag for better compatibility
         // Also escape special characters and use proper quoting
@@ -136,21 +159,42 @@ class KubernetesInstaller {
         fullCommand = command;
         shell = this.platform === 'win32' ? 'cmd.exe' : 'bash';
       }
-      
+
       console.log(`Executing command: ${fullCommand}`);
-      
+
+      // Enhance environment for macOS to include Homebrew paths
+      let enhancedEnv = { ...process.env };
+      if (this.platform === 'darwin') {
+        // Add common Homebrew paths to PATH
+        const homebrewPaths = [
+          '/opt/homebrew/bin',  // Apple Silicon Homebrew
+          '/usr/local/bin',     // Intel Homebrew
+          '/opt/homebrew/sbin',
+          '/usr/local/sbin'
+        ];
+        
+        let newPath = enhancedEnv.PATH || enhancedEnv.Path || '';
+        homebrewPaths.forEach(homebrewPath => {
+          if (!newPath.includes(homebrewPath)) {
+            newPath = `${homebrewPath}:${newPath}`;
+          }
+        });
+        enhancedEnv.PATH = newPath;
+        enhancedEnv.Path = newPath; // For compatibility
+      }
+
       const child = exec(fullCommand, {
         shell: shell,
         windowsVerbatimArguments: windowsVerbatimArguments,
         maxBuffer: 1024 * 1024 * 10,
         timeout: options.timeout || 300000, // Increased default timeout to 5 minutes
-        env: { ...process.env }, // Pass through environment variables
+        env: enhancedEnv, // Enhanced environment with Homebrew paths
         ...options
       }, (error, stdout, stderr) => {
         console.log(`Command completed. Success: ${!error}, Error: ${error ? error.message : 'none'}`);
         console.log(`Stdout: ${stdout.substring(0, 500)}...`); // Limit output length
         if (stderr) console.log(`Stderr: ${stderr.substring(0, 500)}...`); // Limit output length
-        
+
         resolve({
           success: !error,
           output: stdout,
@@ -264,10 +308,15 @@ class KubernetesInstaller {
     }
 
     const result = await this.executeCommand(command, { timeout: 600000 });
-    
+
     // Check if the failure was due to already installed package
     if (!result.success) {
-      if (result.error && (result.error.includes("already installed") || result.error.includes("No available upgrade"))) {
+      if (result.error && (
+        result.error.includes("already installed") || 
+        result.error.includes("No available upgrade") ||
+        result.error.includes("already an App at") ||
+        result.error.includes("/Applications/Docker.app")
+      )) {
         console.log("Docker is already installed, treating as success");
         return {
           success: true,
@@ -277,7 +326,7 @@ class KubernetesInstaller {
         };
       }
     }
-    
+
     return {
       success: result.success,
       message: result.success ? 'Docker installed successfully' : 'Docker installation failed',

@@ -2,7 +2,7 @@
   "name": "kubernetes-multios-installer",
   "productName": "Kubernetes Installer",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Cross-platform Kubernetes installation GUI",
   "main": "electron/main.cjs",
   "author": {
